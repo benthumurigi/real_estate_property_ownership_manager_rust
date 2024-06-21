@@ -1,0 +1,35 @@
+type Error = variant {
+  InvalidInput : record { msg : text };
+  NotFound : record { msg : text };
+  Unauthorized : record { msg : text };
+};
+type HistoryEntry = record { event : text; timestamp : nat64 };
+type Property = record {
+  id : nat64;
+  updated_at : opt nat64;
+  history : vec HistoryEntry;
+  created_at : nat64;
+  owner_id : nat64;
+  tokenized_shares : nat64;
+  address : text;
+};
+type PropertyPayload = record {
+  owner_id : nat64;
+  tokenized_shares : nat64;
+  address : text;
+};
+type Result = variant { Ok : Property; Err : Error };
+type Result_1 = variant { Ok : User; Err : Error };
+type User = record { id : nat64; name : text; contact_info : text };
+type UserPayload = record { name : text; contact_info : text };
+service : {
+  add_property : (PropertyPayload) -> (Result);
+  add_user : (UserPayload) -> (Result_1);
+  delete_property : (nat64) -> (Result);
+  delete_user : (nat64) -> (Result_1);
+  get_property : (nat64) -> (Result) query;
+  get_user : (nat64) -> (Result_1) query;
+  transfer_ownership : (nat64, nat64, nat64, nat64) -> (Result);
+  update_property : (nat64, PropertyPayload) -> (Result);
+  update_user : (nat64, UserPayload) -> (Result_1);
+}

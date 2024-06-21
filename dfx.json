@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "canisters": {
+    "tokenized_real_estate_ownership_rust": {
+      "type": "rust",
+      "package": "tokenized_real_estate_ownership_rust",
+      "candid": "src/tokenized_real_estate_ownership_rust/tokenized_real_estate_ownership_rust.did"
+    }
+  },
+  "output_env_file": ".env"
+}

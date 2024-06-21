@@ -1,0 +1,4 @@
+[workspace]
+members = [
+    "src/tokenized_real_estate_ownership_rust",
+]
