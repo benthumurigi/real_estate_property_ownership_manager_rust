@@ -1,7 +1,8 @@
 #[macro_use]
 extern crate serde;
-use candid::{Decode, Encode};
+use candid::{Decode, Encode, Principal};
 use ic_cdk::api::time;
+use ic_cdk_macros::*;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
 use std::{borrow::Cow, cell::RefCell};
@@ -13,7 +14,7 @@ type IdCell = Cell<u64, Memory>;
 struct Property {
     id: u64,
     address: String,
-    owner_id: u64,
+    owner_id: Principal,
     tokenized_shares: u64,
     created_at: u64,
     updated_at: Option<u64>,
@@ -28,12 +29,12 @@ struct HistoryEntry {
 
 #[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
 struct User {
-    id: u64,
+    id: Principal,
     name: String,
     contact_info: String,
+    role: String,
 }
 
-// a trait that must be implemented for a struct that is stored in a stable struct
 impl Storable for Property {
     fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
         Cow::Owned(Encode!(self).unwrap())
@@ -44,7 +45,6 @@ impl Storable for Property {
     }
 }
 
-// another trait that must be implemented for a struct that is stored in a stable struct
 impl BoundedStorable for Property {
     const MAX_SIZE: u32 = 2048;
     const IS_FIXED_SIZE: bool = false;
@@ -80,7 +80,7 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))
     ));
 
-    static USERS_STORAGE: RefCell<StableBTreeMap<u64, User, Memory>> =
+    static USERS_STORAGE: RefCell<StableBTreeMap<Principal, User, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))
     ));
@@ -90,11 +90,10 @@ thread_local! {
 struct PropertyPayload {
     address: String,
     tokenized_shares: u64,
-    owner_id: u64,
 }
 
-#[ic_cdk::query]
-fn get_property(id: u64) -> Result<Property, Error> {
+#[query]
+async fn get_property(id: u64) -> Result<Property, Error> {
     match _get_property(&id) {
         Some(property) => Ok(property),
         None => Err(Error::NotFound {
@@ -103,10 +102,17 @@ fn get_property(id: u64) -> Result<Property, Error> {
     }
 }
 
-#[ic_cdk::update]
-fn add_property(property: PropertyPayload) -> Result<Property, Error> {
+#[update]
+async fn add_property(property: PropertyPayload) -> Result<Property, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+
+    if user_role != "owner" {
+        return Err(Error::Unauthorized { msg: "Only owners can add properties".to_string() });
+    }
+
     if property.address.is_empty() {
-        return Err(Error::InvalidInput { msg: "All fields must be provided and non-empty".to_string() });
+        return Err(Error::InvalidInput { msg: "Address must be provided and non-empty".to_string() });
     }
 
     let id = ID_COUNTER
@@ -120,28 +126,41 @@ fn add_property(property: PropertyPayload) -> Result<Property, Error> {
         id,
         address: property.address,
         tokenized_shares: property.tokenized_shares,
-        owner_id: property.owner_id,
+        owner_id: caller,
         created_at: time(),
         updated_at: None,
         history: vec![HistoryEntry { timestamp: time(), event: "Property created".to_string() }],
     };
 
     do_insert_property(&property);
+    log_event(format!("Property added: {:?}", property));
     Ok(property)
 }
 
-#[ic_cdk::update]
-fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error> {
+#[update]
+async fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+
+    if user_role != "owner" {
+        return Err(Error::Unauthorized { msg: "Only owners can update properties".to_string() });
+    }
+
     match STORAGE.with(|service| service.borrow().get(&id)) {
         Some(mut property) => {
+            if property.owner_id != caller {
+                return Err(Error::Unauthorized { msg: "Only the owner can update this property".to_string() });
+            }
+
             if !payload.address.is_empty() {
                 property.address = payload.address;
             }
             property.tokenized_shares = payload.tokenized_shares;
-            property.owner_id = payload.owner_id;
             property.updated_at = Some(time());
             property.history.push(HistoryEntry { timestamp: time(), event: "Property updated".to_string() });
+
             do_insert_property(&property);
+            log_event(format!("Property updated: {:?}", property));
             Ok(property)
         }
         None => Err(Error::NotFound {
@@ -153,10 +172,20 @@ fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error>
     }
 }
 
-#[ic_cdk::update]
-fn delete_property(id: u64) -> Result<Property, Error> {
+#[update]
+async fn delete_property(id: u64) -> Result<Property, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+
+    if user_role != "admin" {
+        return Err(Error::Unauthorized { msg: "Only admins can delete properties".to_string() });
+    }
+
     match STORAGE.with(|service| service.borrow_mut().remove(&id)) {
-        Some(property) => Ok(property),
+        Some(property) => {
+            log_event(format!("Property deleted: {:?}", property));
+            Ok(property)
+        },
         None => Err(Error::NotFound {
             msg: format!(
                 "Couldn't delete a property with id={}. Property not found.",
@@ -170,10 +199,11 @@ fn delete_property(id: u64) -> Result<Property, Error> {
 struct UserPayload {
     name: String,
     contact_info: String,
+    role: String,
 }
 
-#[ic_cdk::query]
-fn get_user(id: u64) -> Result<User, Error> {
+#[query]
+async fn get_user(id: Principal) -> Result<User, Error> {
     match _get_user(&id) {
         Some(user) => Ok(user),
         None => Err(Error::NotFound {
@@ -182,31 +212,42 @@ fn get_user(id: u64) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
-fn add_user(user: UserPayload) -> Result<User, Error> {
-    if user.name.is_empty() || user.contact_info.is_empty() {
+#[update]
+async fn add_user(user: UserPayload) -> Result<User, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+
+    if user_role != "admin" {
+        return Err(Error::Unauthorized { msg: "Only admins can add users".to_string() });
+    }
+
+    if user.name.is_empty() || user.contact_info.is_empty() || user.role.is_empty() {
         return Err(Error::InvalidInput { msg: "All fields must be provided and non-empty".to_string() });
     }
 
-    let id = ID_COUNTER
-        .with(|counter| {
-            let current_value = *counter.borrow().get();
-            counter.borrow_mut().set(current_value + 1)
-        })
-        .expect("Cannot increment id counter");
+    let id = caller;
 
     let user = User {
         id,
         name: user.name,
         contact_info: user.contact_info,
+        role: user.role,
     };
 
     do_insert_user(&user);
+    log_event(format!("User added: {:?}", user));
     Ok(user)
 }
 
-#[ic_cdk::update]
-fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
+#[update]
+async fn update_user(id: Principal, payload: UserPayload) -> Result<User, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+
+    if user_role != "admin" {
+        return Err(Error::Unauthorized { msg: "Only admins can update users".to_string() });
+    }
+
     match USERS_STORAGE.with(|service| service.borrow().get(&id)) {
         Some(mut user) => {
             if !payload.name.is_empty() {
@@ -215,7 +256,11 @@ fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
             if !payload.contact_info.is_empty() {
                 user.contact_info = payload.contact_info;
             }
+            if !payload.role.is_empty() {
+                user.role = payload.role;
+            }
             do_insert_user(&user);
+            log_event(format!("User updated: {:?}", user));
             Ok(user)
         }
         None => Err(Error::NotFound {
@@ -227,10 +272,20 @@ fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
-fn delete_user(id: u64) -> Result<User, Error> {
+#[update]
+async fn delete_user(id: Principal) -> Result<User, Error> {
+    let caller = ic_cdk::caller();
+    let user_role = get_user_role(caller).await.unwrap_or("user".to_string());
+   
+    if user_role != "admin" {
+        return Err(Error::Unauthorized { msg: "Only admins can delete users".to_string() });
+    }
+
     match USERS_STORAGE.with(|service| service.borrow_mut().remove(&id)) {
-        Some(user) => Ok(user),
+        Some(user) => {
+            log_event(format!("User deleted: {:?}", user));
+            Ok(user)
+        },
         None => Err(Error::NotFound {
             msg: format!(
                 "Couldn't delete a user with id={}. User not found.",
@@ -240,12 +295,13 @@ fn delete_user(id: u64) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
-fn transfer_ownership(property_id: u64, from: u64, to: u64, shares: u64) -> Result<Property, Error> {
+#[update]
+async fn transfer_ownership(property_id: u64, to: Principal, shares: u64) -> Result<Property, Error> {
+    let caller = ic_cdk::caller();
     match STORAGE.with(|service| service.borrow().get(&property_id)) {
         Some(mut property) => {
-            if property.owner_id != from {
-                return Err(Error::Unauthorized { msg: "The from address is not the current owner_id".to_string() });
+            if property.owner_id != caller {
+                return Err(Error::Unauthorized { msg: "Only the owner can transfer ownership".to_string() });
             }
             if shares > property.tokenized_shares {
                 return Err(Error::InvalidInput { msg: "Not enough shares available for transfer".to_string() });
@@ -259,10 +315,11 @@ fn transfer_ownership(property_id: u64, from: u64, to: u64, shares: u64) -> Resu
 
             property.history.push(HistoryEntry { 
                 timestamp: time(), 
-                event: format!("Transferred {} shares from {} to {}", shares, from, to) 
+                event: format!("Transferred {} shares to {}", shares, to) 
             });
 
             do_insert_property(&property);
+            log_event(format!("Ownership transferred: {:?}", property));
             Ok(property)
         }
         None => Err(Error::NotFound {
@@ -284,8 +341,18 @@ fn _get_property(id: &u64) -> Option<Property> {
     STORAGE.with(|service| service.borrow().get(id))
 }
 
-fn _get_user(id: &u64) -> Option<User> {
+fn _get_user(id: &Principal) -> Option<User> {
     USERS_STORAGE.with(|service| service.borrow().get(id))
+}
+
+// Simulate fetching the user role from a user management system
+async fn get_user_role(user_id: Principal) -> Option<String> {
+    USERS_STORAGE.with(|service| service.borrow().get(&user_id)).map(|user| user.role)
+}
+
+// Log events using IC's event logging capabilities
+fn log_event(event: String) {
+    ic_cdk::println!("{}", event); // Placeholder for actual logging mechanism
 }
 
 #[derive(candid::CandidType, Deserialize, Serialize)]
@@ -295,5 +362,5 @@ enum Error {
     InvalidInput { msg: String },
 }
 
-// need this to generate candid
+// Need this to generate candid
 ic_cdk::export_candid!();
