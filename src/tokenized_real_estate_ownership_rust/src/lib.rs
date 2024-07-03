@@ -1,7 +1,8 @@
 #[macro_use]
 extern crate serde;
-use candid::{Decode, Encode};
+use candid::{Decode, Encode, CandidType, Principal};
 use ic_cdk::api::time;
+use ic_cdk_macros::{query, update};
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
 use std::{borrow::Cow, cell::RefCell};
@@ -9,28 +10,34 @@ use std::{borrow::Cow, cell::RefCell};
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 type IdCell = Cell<u64, Memory>;
 
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
+#[derive(CandidType, Clone, Serialize, Deserialize, Default)]
 struct Property {
     id: u64,
     address: String,
     owner_id: u64,
     tokenized_shares: u64,
     created_at: u64,
+    created_by: Principal,
     updated_at: Option<u64>,
+    updated_by: Option<Principal>,
     history: Vec<HistoryEntry>,
 }
 
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
+#[derive(CandidType, Clone, Serialize, Deserialize, Default)]
 struct HistoryEntry {
     timestamp: u64,
     event: String,
 }
 
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
+#[derive(CandidType, Clone, Serialize, Deserialize, Default)]
 struct User {
     id: u64,
     name: String,
     contact_info: String,
+    created_at: u64,
+    created_by: Principal,
+    updated_at: Option<u64>,
+    updated_by: Option<Principal>,
 }
 
 // a trait that must be implemented for a struct that is stored in a stable struct
@@ -86,14 +93,14 @@ thread_local! {
     ));
 }
 
-#[derive(candid::CandidType, Serialize, Deserialize, Default)]
+#[derive(CandidType, Serialize, Deserialize, Default)]
 struct PropertyPayload {
     address: String,
     tokenized_shares: u64,
     owner_id: u64,
 }
 
-#[ic_cdk::query]
+#[query]
 fn get_property(id: u64) -> Result<Property, Error> {
     match _get_property(&id) {
         Some(property) => Ok(property),
@@ -103,7 +110,7 @@ fn get_property(id: u64) -> Result<Property, Error> {
     }
 }
 
-#[ic_cdk::update]
+#[update]
 fn add_property(property: PropertyPayload) -> Result<Property, Error> {
     if property.address.is_empty() {
         return Err(Error::InvalidInput { msg: "All fields must be provided and non-empty".to_string() });
@@ -122,7 +129,9 @@ fn add_property(property: PropertyPayload) -> Result<Property, Error> {
         tokenized_shares: property.tokenized_shares,
         owner_id: property.owner_id,
         created_at: time(),
+        created_by: ic_cdk::caller(), // Use the caller as the creator
         updated_at: None,
+        updated_by: None,
         history: vec![HistoryEntry { timestamp: time(), event: "Property created".to_string() }],
     };
 
@@ -130,7 +139,7 @@ fn add_property(property: PropertyPayload) -> Result<Property, Error> {
     Ok(property)
 }
 
-#[ic_cdk::update]
+#[update]
 fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error> {
     match STORAGE.with(|service| service.borrow().get(&id)) {
         Some(mut property) => {
@@ -140,6 +149,7 @@ fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error>
             property.tokenized_shares = payload.tokenized_shares;
             property.owner_id = payload.owner_id;
             property.updated_at = Some(time());
+            property.updated_by = Some(ic_cdk::caller()); // Use the caller as the updater
             property.history.push(HistoryEntry { timestamp: time(), event: "Property updated".to_string() });
             do_insert_property(&property);
             Ok(property)
@@ -153,7 +163,7 @@ fn update_property(id: u64, payload: PropertyPayload) -> Result<Property, Error>
     }
 }
 
-#[ic_cdk::update]
+#[update]
 fn delete_property(id: u64) -> Result<Property, Error> {
     match STORAGE.with(|service| service.borrow_mut().remove(&id)) {
         Some(property) => Ok(property),
@@ -166,13 +176,26 @@ fn delete_property(id: u64) -> Result<Property, Error> {
     }
 }
 
-#[derive(candid::CandidType, Serialize, Deserialize, Default)]
+#[query]
+fn get_all_properties(page: u64, page_size: u64) -> Vec<Property> {
+    STORAGE.with(|service| {
+        service
+            .borrow()
+            .iter()
+            .skip((page * page_size) as usize)
+            .take(page_size as usize)
+            .map(|(_, property)| property.clone())
+            .collect()
+    })
+}
+
+#[derive(CandidType, Serialize, Deserialize, Default)]
 struct UserPayload {
     name: String,
     contact_info: String,
 }
 
-#[ic_cdk::query]
+#[query]
 fn get_user(id: u64) -> Result<User, Error> {
     match _get_user(&id) {
         Some(user) => Ok(user),
@@ -182,7 +205,7 @@ fn get_user(id: u64) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
+#[update]
 fn add_user(user: UserPayload) -> Result<User, Error> {
     if user.name.is_empty() || user.contact_info.is_empty() {
         return Err(Error::InvalidInput { msg: "All fields must be provided and non-empty".to_string() });
@@ -199,13 +222,17 @@ fn add_user(user: UserPayload) -> Result<User, Error> {
         id,
         name: user.name,
         contact_info: user.contact_info,
+        created_at: time(),
+        created_by: ic_cdk::caller(), // Use the caller as the creator
+        updated_at: None,
+        updated_by: None,
     };
 
     do_insert_user(&user);
     Ok(user)
 }
 
-#[ic_cdk::update]
+#[update]
 fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
     match USERS_STORAGE.with(|service| service.borrow().get(&id)) {
         Some(mut user) => {
@@ -215,6 +242,8 @@ fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
             if !payload.contact_info.is_empty() {
                 user.contact_info = payload.contact_info;
             }
+            user.updated_at = Some(time());
+            user.updated_by = Some(ic_cdk::caller()); // Use the caller as the updater
             do_insert_user(&user);
             Ok(user)
         }
@@ -227,7 +256,7 @@ fn update_user(id: u64, payload: UserPayload) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
+#[update]
 fn delete_user(id: u64) -> Result<User, Error> {
     match USERS_STORAGE.with(|service| service.borrow_mut().remove(&id)) {
         Some(user) => Ok(user),
@@ -240,7 +269,20 @@ fn delete_user(id: u64) -> Result<User, Error> {
     }
 }
 
-#[ic_cdk::update]
+#[query]
+fn get_all_users(page: u64, page_size: u64) -> Vec<User> {
+    USERS_STORAGE.with(|service| {
+        service
+            .borrow()
+            .iter()
+            .skip((page * page_size) as usize)
+            .take(page_size as usize)
+            .map(|(_, user)| user.clone())
+            .collect()
+    })
+}
+
+#[update]
 fn transfer_ownership(property_id: u64, from: u64, to: u64, shares: u64) -> Result<Property, Error> {
     match STORAGE.with(|service| service.borrow().get(&property_id)) {
         Some(mut property) => {
@@ -288,7 +330,7 @@ fn _get_user(id: &u64) -> Option<User> {
     USERS_STORAGE.with(|service| service.borrow().get(id))
 }
 
-#[derive(candid::CandidType, Deserialize, Serialize)]
+#[derive(CandidType, Deserialize, Serialize)]
 enum Error {
     Unauthorized { msg: String },
     NotFound { msg: String },
