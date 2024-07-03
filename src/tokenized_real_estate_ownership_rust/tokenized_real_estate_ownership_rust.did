@@ -1,35 +1,59 @@
 type Error = variant {
-  InvalidInput : record { msg : text };
-  NotFound : record { msg : text };
-  Unauthorized : record { msg : text };
+    Unauthorized: record { msg: text };
+    NotFound: record { msg: text };
+    InvalidInput: record { msg: text };
 };
-type HistoryEntry = record { event : text; timestamp : nat64 };
+
+type HistoryEntry = record {
+    timestamp: nat64;
+    event: text;
+};
+
 type Property = record {
-  id : nat64;
-  updated_at : opt nat64;
-  history : vec HistoryEntry;
-  created_at : nat64;
-  owner_id : nat64;
-  tokenized_shares : nat64;
-  address : text;
+    id: nat64;
+    address: text;
+    owner_id: nat64;
+    tokenized_shares: nat64;
+    created_at: nat64;
+    created_by: principal;
+    updated_at: opt nat64;
+    updated_by: opt principal;
+    history: vec HistoryEntry;
 };
+
 type PropertyPayload = record {
-  owner_id : nat64;
-  tokenized_shares : nat64;
-  address : text;
+    address: text;
+    tokenized_shares: nat64;
+    owner_id: nat64;
 };
-type Result = variant { Ok : Property; Err : Error };
-type Result_1 = variant { Ok : User; Err : Error };
-type User = record { id : nat64; name : text; contact_info : text };
-type UserPayload = record { name : text; contact_info : text };
+
+type User = record {
+    id: nat64;
+    name: text;
+    contact_info: text;
+    created_at: nat64;
+    created_by: principal;
+    updated_at: opt nat64;
+    updated_by: opt principal;
+};
+
+type UserPayload = record {
+    name: text;
+    contact_info: text;
+};
+
 service : {
-  add_property : (PropertyPayload) -> (Result);
-  add_user : (UserPayload) -> (Result_1);
-  delete_property : (nat64) -> (Result);
-  delete_user : (nat64) -> (Result_1);
-  get_property : (nat64) -> (Result) query;
-  get_user : (nat64) -> (Result_1) query;
-  transfer_ownership : (nat64, nat64, nat64, nat64) -> (Result);
-  update_property : (nat64, PropertyPayload) -> (Result);
-  update_user : (nat64, UserPayload) -> (Result_1);
+    add_property: (PropertyPayload) -> (result Property error Error) query;
+    update_property: (nat64, PropertyPayload) -> (result Property error Error);
+    delete_property: (nat64) -> (result Property error Error);
+    get_property: (nat64) -> (result Property error Error) query;
+    get_all_properties: (nat64, nat64) -> (vec Property) query;
+
+    add_user: (UserPayload) -> (result User error Error);
+    update_user: (nat64, UserPayload) -> (result User error Error);
+    delete_user: (nat64) -> (result User error Error);
+    get_user: (nat64) -> (result User error Error) query;
+    get_all_users: (nat64, nat64) -> (vec User) query;
+
+    transfer_ownership: (nat64, nat64, nat64, nat64) -> (result Property error Error);
 }
